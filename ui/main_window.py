@@ -9,7 +9,7 @@ from PyQt5.QtCore import QTimer
 
 from ui.dashboard_page import DashboardPage
 from ui.camera_page import CameraPage
-        # Telemetri, motor, parametre, pid, log, sistem
+# Telemetri, motor, parametre, pid, log, sistem
 from ui.telemetry_page import TelemetryPage
 from ui.motors_page import MotorsPage
 from ui.params_page import ParamsPage
@@ -30,7 +30,9 @@ class MainWindow(QMainWindow):
         # Pencere
         self.setWindowTitle("ATK ROV STATION")
         self.setGeometry(100, 50, 1680, 920)
-        self.setStyleSheet("background-color:#05070B; color:#EAEAEA; font-family:'Segoe UI';")
+        self.setStyleSheet(
+            "background-color:#05070B; color:#EAEAEA; font-family:'Segoe UI';"
+        )
 
         # MAV & Param
         self.shared_mav = None
@@ -45,7 +47,9 @@ class MainWindow(QMainWindow):
         self.labelBatt = QLabel("Batarya: -- V %--")
 
         # Üst durum
-        self.labelTopStatus = QLabel("ROV: ✖   MAVLink: Bekleniyor   Kamera: ?   Uyarılar: 0")
+        self.labelTopStatus = QLabel(
+            "ROV: ✖   MAVLink: Bekleniyor   Kamera: ?   Uyarılar: 0"
+        )
 
         # UI
         self._build_ui()
@@ -65,7 +69,9 @@ class MainWindow(QMainWindow):
         # ---------- ÜST BAR ----------
         topBar = QHBoxLayout()
         titleLabel = QLabel("⚡  ATK   ATK ROV STATION")
-        titleLabel.setStyleSheet("font-size:22px; font-weight:bold; color:#FFD000;")
+        titleLabel.setStyleSheet(
+            "font-size:22px; font-weight:bold; color:#FFD000;"
+        )
         topBar.addWidget(titleLabel)
         topBar.addStretch()
 
@@ -245,10 +251,15 @@ class MainWindow(QMainWindow):
 
         # -------- KAMERA --------
         self.cam_worker = CameraWorker()
-        self.cam_worker.frameSignal.connect(self.dashboard.update_camera_frame)
-        self.cam_worker.frameSignal.connect(self.cameraPage.update_camera_frame)
+        # Dashboard + Kamera sayfasına aynı frame’i gönder
+        if hasattr(self.dashboard, "update_camera_frame"):
+            self.cam_worker.frameSignal.connect(self.dashboard.update_camera_frame)
+        if hasattr(self.cameraPage, "update_camera_frame"):
+            self.cam_worker.frameSignal.connect(self.cameraPage.update_camera_frame)
+
         if hasattr(self.cam_worker, "statusSignal"):
             self.cam_worker.statusSignal.connect(self._on_camera_status)
+
         self.cam_worker.start()
 
         if hasattr(self.cameraPage, "set_cam_worker"):
@@ -264,7 +275,6 @@ class MainWindow(QMainWindow):
     def _on_mavlink_status(self, ok: bool):
         if ok:
             self.labelMav.setText("MAVLink: ✓ UDP OK")
-            # Kamera durumunu koruyarak yazalım
             self._update_top_status(mav_text="MAVLink: UDP OK")
         else:
             self.labelMav.setText("MAVLink: ✖ UDP YOK")
@@ -290,8 +300,16 @@ class MainWindow(QMainWindow):
         Üst bar string’ini tek noktadan güncelleyelim.
         ROV statusünü şimdilik MAVLink’e göre basit tutuyoruz.
         """
-        mav_part = mav_text or ("MAVLink: UDP OK" if "✓" in self.labelMav.text() else "MAVLink: UDP YOK")
-        cam_part = cam_text or ("Kamera: ✓" if "✓" in getattr(self, "labelTopStatus").text() else "Kamera: ?")
+        current = self.labelTopStatus.text()
+        parts = current.split("   ")
+
+        # Beklenen: [ROV, MAV, Kamera, Uyarılar]
+        rov_part = parts[0] if len(parts) > 0 else "ROV: ✖"
+        mav_part_current = parts[1] if len(parts) > 1 else "MAVLink: Bekleniyor"
+        cam_part_current = parts[2] if len(parts) > 2 else "Kamera: ?"
+
+        mav_part = mav_text or mav_part_current
+        cam_part = cam_text or cam_part_current
 
         # ROV bağlı mı? basitçe MAVLink OK ise bağlı kabul edelim
         if "UDP OK" in mav_part:
@@ -299,7 +317,9 @@ class MainWindow(QMainWindow):
         else:
             rov_part = "ROV: ✖"
 
-        self.labelTopStatus.setText(f"{rov_part}   {mav_part}   {cam_part}   Uyarılar: 0")
+        self.labelTopStatus.setText(
+            f"{rov_part}   {mav_part}   {cam_part}   Uyarılar: 0"
+        )
 
     # ============================================================
     # PARAMETRE ÇEKME
