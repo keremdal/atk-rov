@@ -1,15 +1,15 @@
-# ui/main_window.py
-
+import os
+import json
 import time
+
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QStackedWidget, QLabel
 )
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, Qt
 
 from ui.dashboard_page import DashboardPage
 from ui.camera_page import CameraPage
-# Telemetri, motor, parametre, pid, log, sistem
 from ui.telemetry_page import TelemetryPage
 from ui.motors_page import MotorsPage
 from ui.params_page import ParamsPage
@@ -17,73 +17,74 @@ from ui.pid_page import PIDPage
 from ui.motor_test_page import MotorTestPage
 from ui.log_page import LogPage
 from ui.system_page import SystemPage
+from ui.object_page import ObjectPage
 
 from mavlink.mavlink_reader import MavlinkReader
 from mavlink.param_manager import ParamManager
 from video.camera_worker import CameraWorker
+from input.joystick_worker import JoystickWorker
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # Pencere
+        # FULLSCREEN
+        self.showFullScreen()
+        self.setMinimumSize(1100, 650)
         self.setWindowTitle("ATK ROV STATION")
-        self.setGeometry(100, 50, 1680, 920)
-        self.setStyleSheet(
-            "background-color:#05070B; color:#EAEAEA; font-family:'Segoe UI';"
-        )
 
-        # MAV & Param
+        self.setStyleSheet("background-color:#05070B; color:#EAEAEA; font-family:'Segoe UI';")
+
         self.shared_mav = None
         self.param_manager = None
 
-        # Alt bar label’ları
+        # TOP LABELS
         self.labelTime = QLabel("--:--:--")
         self.labelPing = QLabel("Ping: -- ms")
         self.labelFPS = QLabel("FPS: --")
         self.labelMav = QLabel("MAVLink: ✖")
         self.labelMode = QLabel("Mod: --")
         self.labelBatt = QLabel("Batarya: -- V %--")
+        self.labelTopStatus = QLabel("ROV: ✖   MAVLink: Bekleniyor   Kamera: ?   Uyarılar: 0")
 
-        # Üst durum
-        self.labelTopStatus = QLabel(
-            "ROV: ✖   MAVLink: Bekleniyor   Kamera: ?   Uyarılar: 0"
-        )
+        self.param_cache_path = os.path.join("cache", "params.json")
 
-        # UI
         self._build_ui()
         self._build_footer()
         self._start_workers()
         self._start_clock()
 
-    # ============================================================
-    # UI
-    # ============================================================
+    # FULLSCREEN KEY
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.showNormal()
+        if event.key() == Qt.Key_F11:
+            self.showFullScreen()
+
+    # UI BUILD
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        mainLayout = QVBoxLayout()
-        central.setLayout(mainLayout)
+        main = QVBoxLayout()
+        central.setLayout(main)
 
-        # ---------- ÜST BAR ----------
-        topBar = QHBoxLayout()
-        titleLabel = QLabel("⚡  ATK   ATK ROV STATION")
-        titleLabel.setStyleSheet(
-            "font-size:22px; font-weight:bold; color:#FFD000;"
-        )
-        topBar.addWidget(titleLabel)
-        topBar.addStretch()
+        # TOP BAR
+        top = QHBoxLayout()
+        title = QLabel("⚡ ATK ROV STATION")
+        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD000;")
+        top.addWidget(title)
+        top.addStretch()
 
-        self.labelTopStatus.setStyleSheet("font-size:13px; color:#E5E7EB;")
-        topBar.addWidget(self.labelTopStatus)
-        mainLayout.addLayout(topBar)
+        self.labelTopStatus.setStyleSheet("font-size:11px; color:#E5E7EB;")
+        top.addWidget(self.labelTopStatus)
+        main.addLayout(top)
 
-        # ---------- ORTA KISIM ----------
-        contentLayout = QHBoxLayout()
-        mainLayout.addLayout(contentLayout)
+        # MIDDLE
+        content = QHBoxLayout()
+        main.addLayout(content)
 
-        # Sol menü
+        # MENU
         self.menu = QListWidget()
         self.menu.addItems([
             "Gösterge Paneli",
@@ -94,32 +95,13 @@ class MainWindow(QMainWindow):
             "PID Ayarlari",
             "Motor Test",
             "Kayit / Log",
-            "Sistem"
+            "Sistem",
+            "Görüntü İşleme"  # <-- NEW
         ])
-        self.menu.setFixedWidth(210)
-        self.menu.setStyleSheet("""
-            QListWidget {
-                background-color:#060910;
-                border:1px solid #141A22;
-                font-size:14px;
-                color:#CBD2E1;
-            }
-            QListWidget::item {
-                padding:8px 10px;
-            }
-            QListWidget::item:selected {
-                background-color:#FFD000;
-                color:#000000;
-                border-left:3px solid #FFFFFF;
-                margin-left:-3px;
-            }
-            QListWidget::item:hover {
-                background-color:#141B29;
-            }
-        """)
+        self.menu.setFixedWidth(150)
         self.menu.currentRowChanged.connect(self.pages_setIndex)
 
-        # Sayfalar
+        # PAGES
         self.pages = QStackedWidget()
 
         self.dashboard = DashboardPage()
@@ -131,215 +113,133 @@ class MainWindow(QMainWindow):
         self.motorTestPage = MotorTestPage()
         self.logPage = LogPage()
         self.systemPage = SystemPage()
+        self.objectPage = ObjectPage()
 
-        self.pages.addWidget(self.dashboard)      # 0
-        self.pages.addWidget(self.cameraPage)     # 1
-        self.pages.addWidget(self.telemetryPage)  # 2
-        self.pages.addWidget(self.motorsPage)     # 3
-        self.pages.addWidget(self.paramsPage)     # 4
-        self.pages.addWidget(self.pidPage)        # 5
-        self.pages.addWidget(self.motorTestPage)  # 6
-        self.pages.addWidget(self.logPage)        # 7
-        self.pages.addWidget(self.systemPage)     # 8
+        for p in [
+            self.dashboard, self.cameraPage, self.telemetryPage,
+            self.motorsPage, self.paramsPage, self.pidPage,
+            self.motorTestPage, self.logPage, self.systemPage,
+            self.objectPage
+        ]:
+            self.pages.addWidget(p)
 
-        contentLayout.addWidget(self.menu)
-        contentLayout.addWidget(self.pages)
-
-        # Default sayfa
+        content.addWidget(self.menu)
+        content.addWidget(self.pages)
         self.menu.setCurrentRow(0)
 
-    # ============================================================
-    # ALT BAR
-    # ============================================================
+    # FOOTER
     def _build_footer(self):
-        footerLayout = QHBoxLayout()
+        bar = QHBoxLayout()
 
-        def style_lbl(lbl):
-            lbl.setStyleSheet(
-                "background-color:#0D131A; padding:4px 10px;"
-                "border-top:1px solid #202632; font-size:12px;"
-            )
+        def style(lbl):
+            lbl.setStyleSheet("font-size:11px; padding:2px 5px;")
 
-        # label’ları stillendir
-        for lbl in [self.labelTime, self.labelPing, self.labelFPS,
-                    self.labelMav, self.labelMode, self.labelBatt]:
-            style_lbl(lbl)
+        for lbl in [
+            self.labelTime, self.labelPing, self.labelFPS,
+            self.labelMav, self.labelMode, self.labelBatt
+        ]:
+            style(lbl)
 
-        def make_sep():
-            s = QLabel("|")
-            s.setStyleSheet(
-                "background-color:#0D131A; padding:4px 4px;"
-                "border-top:1px solid #202632; color:#4B5563;"
-            )
-            return s
+        bar.addWidget(self.labelTime)
+        bar.addWidget(QLabel("|"))
+        bar.addWidget(self.labelPing)
+        bar.addWidget(QLabel("|"))
+        bar.addWidget(self.labelFPS)
+        bar.addWidget(QLabel("|"))
+        bar.addWidget(self.labelMav)
+        bar.addWidget(QLabel("|"))
+        bar.addWidget(self.labelMode)
+        bar.addWidget(QLabel("|"))
+        bar.addWidget(self.labelBatt)
+        bar.addStretch()
 
-        footerLayout.addWidget(self.labelTime)
-        footerLayout.addWidget(make_sep())
-        footerLayout.addWidget(self.labelPing)
-        footerLayout.addWidget(make_sep())
-        footerLayout.addWidget(self.labelFPS)
-        footerLayout.addWidget(make_sep())
-        footerLayout.addWidget(self.labelMav)
-        footerLayout.addWidget(make_sep())
-        footerLayout.addWidget(self.labelMode)
-        footerLayout.addWidget(make_sep())
-        footerLayout.addWidget(self.labelBatt)
-        footerLayout.addStretch()
+        container = QWidget()
+        container.setFixedHeight(24)
+        container.setLayout(bar)
+        self.centralWidget().layout().addWidget(container)
 
-        footerWidget = QWidget()
-        footerWidget.setLayout(footerLayout)
-        footerWidget.setFixedHeight(30)
-        self.centralWidget().layout().addWidget(footerWidget)
-
-    # ============================================================
-    # SAAT
-    # ============================================================
+    # CLOCK
     def _start_clock(self):
         self._update_time()
         t = QTimer(self)
         t.timeout.connect(self._update_time)
         t.start(1000)
-        self.clock = t
 
     def _update_time(self):
         self.labelTime.setText(time.strftime("%H:%M:%S"))
 
-    # ============================================================
-    # SAYFA DEĞİŞİMİ
-    # ============================================================
+    # PAGE SWITCH
     def pages_setIndex(self, index):
         self.pages.setCurrentIndex(index)
 
-    # ============================================================
-    # WORKER BAŞLATMA
-    # ============================================================
+    # WORKERS
     def _start_workers(self):
-        # -------- MAVLINK (UDP AUTO-SCAN) --------
+        # MAVLINK
         self.mav_worker = MavlinkReader()
-
-        # Bağlantı durumu + MAV nesnesi
-        if hasattr(self.mav_worker, "connectionStatus"):
-            self.mav_worker.connectionStatus.connect(self._on_mavlink_status)
-        if hasattr(self.mav_worker, "mavReady"):
-            self.mav_worker.mavReady.connect(self._on_mav_ready)
-
-        # Telemetri sinyalleri
+        self.mav_worker.connectionStatus.connect(self._on_mavlink_status)
+        self.mav_worker.mavReady.connect(self._on_mav_ready)
         self.mav_worker.depthSignal.connect(self.dashboard.update_depth)
         self.mav_worker.headingSignal.connect(self.dashboard.update_heading)
         self.mav_worker.batterySignal.connect(self.dashboard.update_battery)
         self.mav_worker.motorSignal.connect(self.dashboard.update_motors)
-
-        # Alt bar için opsiyonel sinyaller (varsa bağla, yoksa hata verme)
-        if hasattr(self.mav_worker, "pingSignal"):
-            self.mav_worker.pingSignal.connect(
-                lambda p: self.labelPing.setText(f"Ping: {p:.0f} ms")
-            )
-        if hasattr(self.mav_worker, "fpsSignal"):
-            self.mav_worker.fpsSignal.connect(
-                lambda f: self.labelFPS.setText(f"FPS: {f}")
-            )
-        if hasattr(self.mav_worker, "modeSignal"):
-            self.mav_worker.modeSignal.connect(
-                lambda m: self.labelMode.setText(f"Mod: {m}")
-            )
-        if hasattr(self.mav_worker, "batteryStatusSignal"):
-            self.mav_worker.batteryStatusSignal.connect(
-                lambda v, pr: self.labelBatt.setText(f"Batarya: {v:.2f} V %{pr}")
-            )
-
         self.mav_worker.start()
 
-        # -------- KAMERA --------
+        # CAMERA
         self.cam_worker = CameraWorker()
-        # Dashboard + Kamera sayfasına aynı frame’i gönder
-        if hasattr(self.dashboard, "update_camera_frame"):
-            self.cam_worker.frameSignal.connect(self.dashboard.update_camera_frame)
-        if hasattr(self.cameraPage, "update_camera_frame"):
-            self.cam_worker.frameSignal.connect(self.cameraPage.update_camera_frame)
-
-        if hasattr(self.cam_worker, "statusSignal"):
-            self.cam_worker.statusSignal.connect(self._on_camera_status)
-
+        self.cam_worker.frameSignal.connect(self.dashboard.update_camera_frame)
+        self.cam_worker.frameSignal.connect(self.cameraPage.update_camera_frame)
+        self.cam_worker.frameSignal.connect(self.objectPage.update_object_frame)
+        self.cam_worker.statusSignal.connect(self._on_camera_status)
         self.cam_worker.start()
 
-        if hasattr(self.cameraPage, "set_cam_worker"):
-            self.cameraPage.set_cam_worker(self.cam_worker)
+        # JOYSTICK
+        try:
+            self.joy = JoystickWorker()
+            self.joy.statusSignal.connect(self._on_joy_status)
+            self.joy.axesSignal.connect(self._on_joy_axes)
+            self.joy.buttonsSignal.connect(self._on_joy_buttons)
+            self.joy.start()
+        except Exception as e:
+            print("❌ Joystick başlatılamadı:", e)
 
-        # -------- PARAM --------
-        if hasattr(self.paramsPage, "btnFetch"):
-            self.paramsPage.btnFetch.clicked.connect(self.start_param_download)
-
-    # ============================================================
-    # MAVLINK CALLBACK'LERİ
-    # ============================================================
+    # STATUS UPDATE
     def _on_mavlink_status(self, ok: bool):
-        if ok:
-            self.labelMav.setText("MAVLink: ✓ UDP OK")
-            self._update_top_status(mav_text="MAVLink: UDP OK")
-        else:
-            self.labelMav.setText("MAVLink: ✖ UDP YOK")
-            self._update_top_status(mav_text="MAVLink: UDP YOK")
+        self.labelMav.setText("MAVLink: ✓" if ok else "MAVLink: ✖")
+        self._update_top_status()
 
     def _on_mav_ready(self, mav):
-        print("✓ MAV Nesnesi geldi (UDP) ✓")
         self.shared_mav = mav
 
-    # ============================================================
-    # KAMERA CALLBACK
-    # ============================================================
-    def _on_camera_status(self, text: str, ok: bool):
-        # CameraPage içinde bir set_status varsa onu da kullan
-        if hasattr(self.cameraPage, "set_status"):
-            self.cameraPage.set_status(text, ok)
+    def _on_camera_status(self, text: str, ok: bool = True):
+        self._update_top_status()
 
-        cam_txt = "Kamera: ✓" if ok else "Kamera: ✖"
-        self._update_top_status(cam_text=cam_txt)
+    def _on_joy_status(self, ok: bool):
+        pass
 
-    def _update_top_status(self, mav_text=None, cam_text=None):
-        """
-        Üst bar string’ini tek noktadan güncelleyelim.
-        ROV statusünü şimdilik MAVLink’e göre basit tutuyoruz.
-        """
-        current = self.labelTopStatus.text()
-        parts = current.split("   ")
+    def _on_joy_axes(self, axes):
+        pass
 
-        # Beklenen: [ROV, MAV, Kamera, Uyarılar]
-        rov_part = parts[0] if len(parts) > 0 else "ROV: ✖"
-        mav_part_current = parts[1] if len(parts) > 1 else "MAVLink: Bekleniyor"
-        cam_part_current = parts[2] if len(parts) > 2 else "Kamera: ?"
+    def _on_joy_buttons(self, buttons):
+        pass
 
-        mav_part = mav_text or mav_part_current
-        cam_part = cam_text or cam_part_current
-
-        # ROV bağlı mı? basitçe MAVLink OK ise bağlı kabul edelim
-        if "UDP OK" in mav_part:
-            rov_part = "ROV: Bağlı"
-        else:
-            rov_part = "ROV: ✖"
-
+    def _update_top_status(self):
+        cam = "✓"
         self.labelTopStatus.setText(
-            f"{rov_part}   {mav_part}   {cam_part}   Uyarılar: 0"
+            f"ROV: {'Bağlı' if '✓' in self.labelMav.text() else '✖'}   "
+            f"{self.labelMav.text()}   Kamera: {cam}   Uyarılar: 0"
         )
 
-    # ============================================================
-    # PARAMETRE ÇEKME
-    # ============================================================
-    def start_param_download(self):
-        if not self.shared_mav:
-            self.paramsPage.set_status("❗ MAVLink UDP bağlı değil!")
-            return
-
-        # Aynı anda iki thread açma
-        if self.param_manager is not None and self.param_manager.isRunning():
-            self.paramsPage.set_status("Parametreler zaten çekiliyor…")
-            return
-
-        self.param_manager = ParamManager()
-        self.param_manager.set_mav(self.shared_mav)
-        self.paramsPage.set_manager(self.param_manager)
-
-        self.param_manager.statusSignal.connect(self.paramsPage.set_status)
-        self.param_manager.progressSignal.connect(self.paramsPage.update_progress)
-        self.param_manager.listReady.connect(self.paramsPage.show_param_list)
-
-        self.param_manager.start()
+    # CLOSE
+    def closeEvent(self, event):
+        try:
+            self.mav_worker.quit()
+            self.mav_worker.wait(500)
+        except:
+            pass
+        try:
+            self.cam_worker.stop()
+            self.cam_worker.quit()
+            self.cam_worker.wait(500)
+        except:
+            pass
+        event.accept()

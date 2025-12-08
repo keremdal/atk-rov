@@ -11,16 +11,12 @@ class CameraPage(QWidget):
         layout = QVBoxLayout()
 
         self.cameraLabel = QLabel("KAMERA BEKLENİYOR...")
-        self.cameraLabel.setStyleSheet("background-color:#111; color:white; font-size:16px;")
-        self.cameraLabel.setFixedHeight(350)
+        self.cameraLabel.setStyleSheet("background-color:#111; color:white; font-size:14px;")
+        self.cameraLabel.setFixedHeight(300)  # LAPTOP UYUMLU YÜKSEKLİK
         layout.addWidget(self.cameraLabel)
 
         self.btnStart = QPushButton("Kamera Başlat")
         self.btnStop = QPushButton("Kamera Durdur")
-
-        # START RECORD ve STOP RECORD BAĞLANTILARI KALDIRILDI !!!
-        # self.btnStart.clicked.connect(self.cam_worker.start_record)
-        # self.btnStop.clicked.connect(self.cam_worker.stop_record)
 
         layout.addWidget(self.btnStart)
         layout.addWidget(self.btnStop)
@@ -30,11 +26,30 @@ class CameraPage(QWidget):
     def set_cam_worker(self, worker):
         self.cam_worker = worker
 
-    def update_frame(self, frame):
+        # Eğer kayıt fonksiyonları varsa bağla
+        if hasattr(worker, "start_record"):
+            self.btnStart.clicked.connect(worker.start_record)
+        if hasattr(worker, "stop_record"):
+            self.btnStop.clicked.connect(worker.stop_record)
+
+    # 🔥 MAINWINDOW ile uyumlu FONKSİYON
+    def update_camera_frame(self, frame):
         if frame is None:
             return
 
         h, w, ch = frame.shape
-        qimg = QImage(frame.data, w, h, ch * w, QImage.Format_BGR888)
+        qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
+
+        # Fit to label
+        pix = pix.scaled(
+            self.cameraLabel.width(),
+            self.cameraLabel.height(),
+            aspectRatioMode=1
+        )
+
         self.cameraLabel.setPixmap(pix)
+
+    # Eski fonksiyonun da çalışması için:
+    def update_frame(self, frame):
+        self.update_camera_frame(frame)

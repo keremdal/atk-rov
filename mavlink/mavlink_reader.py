@@ -9,38 +9,74 @@ class MavlinkReader(QThread):
     connectionStatus = pyqtSignal(bool)
     mavReady = pyqtSignal(object)
 
+    def __init__(self):
+        super().__init__()
+        self.master = None
+        self.running = True
+
     def run(self):
         print("MAVLINK: AUTO SCAN başlıyor...")
 
-        # Olası bağlantılar:
+        # Deneceğimiz bağlantılar
         connections = [
-            'udp:192.168.2.2:14550',
-            'udp:0.0.0.0:14550',
-            'udp:0.0.0.0:14552',
-            'udp:192.168.2.2:14552',
-            'udp:192.168.2.2:14000',
-            'udp:192.168.2.2:14660',
-        ]
+    'udp:0.0.0.0:14550',
+    'udp:0.0.0.0:14552',
+    'udp:0.0.0.0:14000',
+]
 
-        self.master = None
 
-        # sırayla dene
+        # Sırayla dene
         for c in connections:
             try:
                 print(f"Deniyorum → {c}")
                 m = mavutil.mavlink_connection(c, autoreconnect=True, timeout=3)
-                
-                msg = m.recv_match(type="HEARTBEAT", blocking=True, timeout=2)
+
+                # ANY MESSAGE (Heartbeat değil, herhangi bir mesaj)
+                msg = m.recv_match(blocking=True, timeout=2)
+
                 if msg:
                     print(f"✔ MAVLINK BAĞLANDI → {c}")
                     self.master = m
                     self.connectionStatus.emit(True)
                     self.mavReady.emit(self.master)
                     break
-            except:
-                pass
+
+            except Exception as e:
+                print("Hata:", e)
+                continue
 
         if self.master is None:
             print("❗ MAVLINK BAĞLANAMADI ❗")
             self.connectionStatus.emit(False)
             return
+
+        # Sürekli veri dinleme
+        while self.running:
+            try:
+                msg = self.master.recv_match(blocking=True, timeout=1)
+                if not msg:
+                    continue
+
+                msg_type = msg.get_type()
+
+                # Depth
+                if msg_type == "GLOBAL_POSITION_INT":
+                    depth = msg.relative_alt / 1000.0
+                    self.depthSignal.emit(depth)
+
+                # Heading
+                if msg_type == "VFR_HUD":
+                    heading = msg.heading
+                    self.headingSignal.emit(heading)
+
+                # Battery
+                if msg_type == "SYS_STATUS":
+                    voltage = msg.voltage_battery / 1000.0
+                    current = msg.current_battery / 100.0
+                    self.batterySignal.emit(voltage, current)
+
+            except:
+                pass
+
+    def stop(self):
+        self.running = False

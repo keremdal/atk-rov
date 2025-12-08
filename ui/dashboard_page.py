@@ -1,131 +1,137 @@
-from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QListWidget, QProgressBar
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QImage, QPixmap
+
 
 class DashboardPage(QWidget):
     def __init__(self):
         super().__init__()
-        self._build_ui()
 
+        # Telemetri değerleri
+        self._depth = None
+        self._heading = None
+        self._voltage = None
+        self._batt_pct = None
+
+        self._build_ui()
+        self._setup_overlay()
+        self._setup_timer()
+
+    # ------------------------------------------------------
     def _build_ui(self):
         layout = QVBoxLayout()
         layout.setSpacing(12)
 
-        self.camStatus = QLabel("🔴 Kamera bağlı değil")
-        self.camStatus.setStyleSheet("font-size:15px; font-weight:bold; color:#FF4444;")
+        # İstersen üstte küçük bir status text de bırakabiliriz
+        self.camStatus = QLabel("KAMERA")
         self.camStatus.setAlignment(Qt.AlignCenter)
+        self.camStatus.setStyleSheet(
+            "font-size:14px; font-weight:bold; color:#E5E7EB;"
+        )
         layout.addWidget(self.camStatus)
 
+        # BÜYÜK KAMERA ALANI
         self.cameraLabel = QLabel("CAMERA")
-        self.cameraLabel.setFixedHeight(350)
+        self.cameraLabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.cameraLabel.setMinimumHeight(600)
         self.cameraLabel.setAlignment(Qt.AlignCenter)
         self.cameraLabel.setStyleSheet(
-            "background-color:#14171c; border-radius:12px; "
-            "border:1px solid #2A3441; font-size:22px; color:#8C99A5;"
+            "background-color:#14171c; "
+            "border:1px solid #2A3441; "
+            "border-radius:12px; "
+            "font-size:24px; "
+            "color:#FFFFFF;"
         )
         layout.addWidget(self.cameraLabel)
 
-        midLayout = QHBoxLayout()
-
-        cardsLayout = QHBoxLayout()
-        self.depthCard, self.depthLabel = self._make_card("Derinlik", "-- m")
-        self.headingCard, self.headingLabel = self._make_card("Heading", "--°")
-        self.battCard, self.battLabel = self._make_card("Batarya", "-- V")
-
-        cardsLayout.addWidget(self.depthCard)
-        cardsLayout.addWidget(self.headingCard)
-        cardsLayout.addWidget(self.battCard)
-
-        leftMid = QVBoxLayout()
-        leftMid.addLayout(cardsLayout)
-
-        motorsLayout = QGridLayout()
-        motorsLayout.setSpacing(6)
-        self.motorBars = []
-        for i in range(8):
-            mName = QLabel(f"M{i+1}")
-            bar = QProgressBar()
-            bar.setMaximum(100)
-            bar.setValue(0)
-            bar.setStyleSheet("QProgressBar::chunk{ background-color:#FFD000; }")
-
-            val = QLabel("0%")
-
-            motorsLayout.addWidget(mName, i, 0)
-            motorsLayout.addWidget(bar, i, 1)
-            motorsLayout.addWidget(val, i, 2)
-
-            self.motorBars.append((bar, val))
-
-        leftMid.addLayout(motorsLayout)
-        midLayout.addLayout(leftMid)
-
-        self.logList = QListWidget()
-        self.logList.addItem("Log sistemi hazir")
-        self.logList.setFixedWidth(350)
-        self.logList.setStyleSheet("background-color:#111821; border-radius:10px;")
-        midLayout.addWidget(self.logList)
-
-        layout.addLayout(midLayout)
         self.setLayout(layout)
 
-
-    def _make_card(self, title, value):
-        frame = QFrame()
-        frame.setStyleSheet(
-            "background-color:#111821; border-radius:10px; border:1px solid #2A3441;"
+    # ------------------------------------------------------
+    def _setup_overlay(self):
+        # Sağ alt köşede küçük beyaz yazı
+        self.overlay = QLabel(self.cameraLabel)
+        self.overlay.setStyleSheet(
+            "color: white; font-size: 14px; "
+            "background-color: rgba(0,0,0,140); "
+            "padding:3px 6px; border-radius:6px;"
         )
-        vlayout = QVBoxLayout()
-        t = QLabel(title)
-        v = QLabel(value)
-        t.setStyleSheet("font-size:14px; color:#9DA6B2;")
-        v.setStyleSheet("font-size:28px; font-weight:bold; color:white;")
-        vlayout.addWidget(t)
-        vlayout.addWidget(v)
-        frame.setLayout(vlayout)
-        return frame, v
+        self.overlay.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.overlay.resize(230, 28)
+        self.overlay.move(
+            self.cameraLabel.width() - self.overlay.width() - 10,
+            self.cameraLabel.height() - self.overlay.height() - 10
+        )
+        self._refresh_overlay()
 
-    def update_depth(self, d):
-        self.depthLabel.setText(f"{d:.2f} m")
+    def _setup_timer(self):
+        # Pencere yeniden boyutlandıkça overlay pozisyonunu düzelt
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._fix_overlay_position)
+        self._timer.start(400)
 
-    def update_heading(self, h):
-        self.headingLabel.setText(f"{h:.0f}°")
+    def _fix_overlay_position(self):
+        self.overlay.move(
+            self.cameraLabel.width() - self.overlay.width() - 10,
+            self.cameraLabel.height() - self.overlay.height() - 10
+        )
 
-    def update_battery(self, volt, percent):
-        self.battLabel.setText(f"{volt:.2f} V / %{percent:.0f}")
-
-    def update_motors(self, motors):
-        for i, val in enumerate(motors):
-            bar, label = self.motorBars[i]
-            bar.setValue(abs(val))
-            label.setText(f"{val}%")
-
-    # ============= KAMERA =============
+    # ------------------------------------------------------
+    # KAMERA FRAME GÜNCELLEME
     def update_camera_frame(self, frame):
-        """
-        frame buraya her zaman QImage olarak gelecek — None gelebilir.
-        """
         if frame is None:
-            self.camStatus.setText("🔴 Kamera yok")
-            self.camStatus.setStyleSheet(
-                "font-size:15px; font-weight:bold; color:#FF4444;"
-            )
-            self.cameraLabel.setText("NO SIGNAL")
             return
 
-        # Frame QImage garantilidir
-        if isinstance(frame, QImage):
-            self.camStatus.setText("🟢 Kamera aktif")
-            self.camStatus.setStyleSheet(
-                "font-size:15px; font-weight:bold; color:#00FF66;"
-            )
+        # frame: BGR -> RGB
+        try:
+            h, w, ch = frame.shape
+        except Exception:
+            return
 
-            pix = QPixmap.fromImage(frame)
-            self.cameraLabel.setPixmap(pix)
-            self.cameraLabel.setScaledContents(True)
-        else:
-            self.camStatus.setText("⚠️ Kamera format hatası")
-            self.camStatus.setStyleSheet(
-                "font-size:15px; font-weight:bold; color:#FFBB00;"
+        bytes_per_line = ch * w
+        img = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(img)
+
+        self.cameraLabel.setPixmap(
+            pix.scaled(
+                self.cameraLabel.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
             )
-            self.cameraLabel.setText("FRAME ERROR")
+        )
+
+    # ------------------------------------------------------
+    # MAVLINK SİNYALLERİ İÇİN FONKSİYONLAR
+    # Bunları MainWindow kullanıyor.
+
+    def update_depth(self, depth: float):
+        self._depth = depth
+        self._refresh_overlay()
+
+    def update_heading(self, heading: float):
+        self._heading = heading
+        self._refresh_overlay()
+
+    def update_battery(self, voltage: float, percent: float = None):
+        self._voltage = voltage
+        self._batt_pct = percent
+        self._refresh_overlay()
+
+    def update_motors(self, *args, **kwargs):
+        # Motor barlarını ekranda göstermiyoruz ama
+        # sinyali boşa atmak için fonksiyon var.
+        pass
+
+    # ------------------------------------------------------
+    def _refresh_overlay(self):
+        # None olanları "--" göster
+        d = f"{self._depth:.1f}m" if self._depth is not None else "--m"
+        h = f"{self._heading:.0f}°" if self._heading is not None else "--°"
+        if self._voltage is not None:
+            if self._batt_pct is not None:
+                b = f"{self._voltage:.1f}V %{int(self._batt_pct)}"
+            else:
+                b = f"{self._voltage:.1f}V"
+        else:
+            b = "--V"
+
+        self.overlay.setText(f"D: {d}   HDG: {h}   BAT: {b}")
