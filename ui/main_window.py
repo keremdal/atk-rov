@@ -1,12 +1,11 @@
-import os
-import json
 import time
+from pymavlink import mavutil
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QStackedWidget, QLabel
 )
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from ui.dashboard_page import DashboardPage
 from ui.camera_page import CameraPage
@@ -17,78 +16,74 @@ from ui.pid_page import PIDPage
 from ui.motor_test_page import MotorTestPage
 from ui.log_page import LogPage
 from ui.system_page import SystemPage
-from ui.object_page import ObjectPage   # 🔹 YENİ: Nesne Algılama sayfası
+from ui.object_page import ObjectPage
 
-from mavlink.mavlink_reader import MavlinkReader
-from mavlink.param_manager import ParamManager
 from video.camera_worker import CameraWorker
 from input.joystick_worker import JoystickWorker
+from input.joy_center import load_center, save_center
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, rov):
         super().__init__()
 
-        self.showFullScreen()
-        self.setMinimumSize(1100, 650)
-
-        self.setWindowTitle("ATK ROV STATION")
-        self.setStyleSheet("background-color:#05070B; color:#EAEAEA; font-family:'Segoe UI';")
-
+        self.rov = rov
         self.shared_mav = None
-        self.param_manager = None
+        self.target_sys = None
+        self.target_comp = None
         self.armed = False
 
-        self.joy_center = None  # AUTO CALIBRATION
-        self.throttle = 0.0
+        self.joy_center = load_center()
+        self.cmd_surge = 0.0
+        self.cmd_strafe = 0.0
+        self.cmd_throttle = 0.0
+        self.cmd_yaw = 0.0
+        self.speed_factor = 1.0
 
-        # Durum flagleri
+        self.last_start_btn = 0
+        self.last_back_btn = 0
+
+        self.manual_block_until = 0  # NEW !!!
+
         self.mav_ok = False
         self.camera_ok = False
-
-        self.labelTime = QLabel("--:--:--")
-        self.labelPing = QLabel("Ping: -- ms")
-        self.labelFPS = QLabel("FPS: --")
-        self.labelMav = QLabel("MAVLink: ✖")
-        self.labelMode = QLabel("Mod: --")
-        self.labelBatt = QLabel("Batarya: -- V %--")
-        self.labelTopStatus = QLabel("ROV: ✖   MAVLink: Bekleniyor   Kamera: ✖   Uyarılar: 0")
-
-        self.param_cache_path = os.path.join("cache", "params.json")
 
         self._build_ui()
         self._build_footer()
         self._start_workers()
         self._start_clock()
 
-    # ===================== KEYS =====================
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.showNormal()
-        if event.key() == Qt.Key_F11:
-            self.showFullScreen()
-        if event.key() == Qt.Key_R:
-            self.joy_center = None
-            print("🔄 Joystick kalibrasyon reset — tekrar ortada bekle!")
+        self.showFullScreen()
+        self.setWindowTitle("ATK ROV STATION")
 
-    # ===================== UI =====================
+        # CONTROL LOOP
+        self.ctrl_timer = QTimer(self)
+        self.ctrl_timer.timeout.connect(self._send_manual_control)
+        self.ctrl_timer.start(50)
+
+        # HEARTBEAT GCS
+        self.hb_timer = QTimer(self)
+        self.hb_timer.timeout.connect(self._send_gcs_heartbeat)
+        self.hb_timer.start(1000)
+
+    # =================== UI ======================
     def _build_ui(self):
-        central = QWidget()
+        central = QWidget(self)
         self.setCentralWidget(central)
-        main = QVBoxLayout()
-        central.setLayout(main)
+        main = QVBoxLayout(central)
 
         top = QHBoxLayout()
-        title = QLabel("⚡ ATK   ROV STATION")
-        title.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD000;")
+        title = QLabel("⚡ ATK ROV STATION")
+        title.setStyleSheet("font-size:17px; font-weight:bold; color:#FFD000;")
         top.addWidget(title)
+
+        self.labelTop = QLabel("ROV: ✖   MAVLink: Bekleniyor   Kamera: ✖   Speed: x1.0")
         top.addStretch()
-        self.labelTopStatus.setStyleSheet("font-size:11px; color:#E5E7EB;")
-        top.addWidget(self.labelTopStatus)
+        top.addWidget(self.labelTop)
         main.addLayout(top)
 
-        content = QHBoxLayout()
-        main.addLayout(content)
+        body = QHBoxLayout()
+        main.addLayout(body)
 
         self.menu = QListWidget()
         self.menu.addItems([
@@ -97,278 +92,261 @@ class MainWindow(QMainWindow):
             "Telemetri",
             "Motorlar",
             "Parametreler",
-            "PID Ayarlari",
+            "PID Ayarları",
             "Motor Test",
-            "Kayit / Log",
+            "Kayıt / Log",
             "Sistem",
-            "Nesne Algılama"      # 🔹 YENİ MENU ITEM
+            "Nesne Algılama"
         ])
-        self.menu.setFixedWidth(150)
+        self.menu.setFixedWidth(160)
 
         self.pages = QStackedWidget()
-
         self.dashboard = DashboardPage()
         self.cameraPage = CameraPage()
         self.telemetryPage = TelemetryPage()
         self.motorsPage = MotorsPage()
         self.paramsPage = ParamsPage()
         self.pidPage = PIDPage()
-        self.motorTestPage = MotorTestPage()
+        self.motorTestPage = MotorTestPage(self)
         self.logPage = LogPage()
         self.systemPage = SystemPage()
-        self.objectPage = ObjectPage()   # 🔹 YENİ SAYFA
+        self.objectPage = ObjectPage()
 
         for p in [
-            self.dashboard, self.cameraPage, self.telemetryPage, self.motorsPage,
-            self.paramsPage, self.pidPage, self.motorTestPage, self.logPage,
-            self.systemPage, self.objectPage
+            self.dashboard, self.cameraPage, self.telemetryPage,
+            self.motorsPage, self.paramsPage, self.pidPage,
+            self.motorTestPage, self.logPage, self.systemPage,
+            self.objectPage
         ]:
             self.pages.addWidget(p)
 
-        content.addWidget(self.menu)
-        content.addWidget(self.pages)
+        body.addWidget(self.menu)
+        body.addWidget(self.pages)
 
+        self.menu.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.menu.setCurrentRow(0)
-        self.menu.currentRowChanged.connect(self.pages_setIndex)
 
-    # ===================== PAGE SWITCH =====================
-    def pages_setIndex(self, index):
-        self.pages.setCurrentIndex(index)
-
-    # ===================== FOOTER =====================
+    # =================== FOOTER ======================
     def _build_footer(self):
         bar = QHBoxLayout()
+        self.labelTime = QLabel("--:--:--")
+        self.labelSpeed = QLabel("Speed: x1.0")
 
-        def style(lbl):
-            lbl.setStyleSheet("font-size:11px; padding:2px 5px;")
-
-        for lbl in [
-            self.labelTime, self.labelPing, self.labelFPS,
-            self.labelMav, self.labelMode, self.labelBatt
-        ]:
-            style(lbl)
+        for w in [self.labelTime, self.labelSpeed]:
+            w.setStyleSheet("font-size:11px; padding:2px 4px;")
 
         bar.addWidget(self.labelTime)
         bar.addWidget(QLabel("|"))
-        bar.addWidget(self.labelPing)
-        bar.addWidget(QLabel("|"))
-        bar.addWidget(self.labelFPS)
-        bar.addWidget(QLabel("|"))
-        bar.addWidget(self.labelMav)
-        bar.addWidget(QLabel("|"))
-        bar.addWidget(self.labelMode)
-        bar.addWidget(QLabel("|"))
-        bar.addWidget(self.labelBatt)
+        bar.addWidget(self.labelSpeed)
         bar.addStretch()
 
-        container = QWidget()
-        container.setFixedHeight(24)
-        container.setLayout(bar)
-        self.centralWidget().layout().addWidget(container)
+        footer = QWidget()
+        footer.setFixedHeight(24)
+        footer.setLayout(bar)
+        self.centralWidget().layout().addWidget(footer)
 
-    # ===================== CLOCK =====================
+    # =================== CLOCK ======================
     def _start_clock(self):
-        self._update_time()
         t = QTimer(self)
-        t.timeout.connect(self._update_time)
+        t.timeout.connect(lambda: self.labelTime.setText(time.strftime("%H:%M:%S")))
         t.start(1000)
 
-    def _update_time(self):
-        self.labelTime.setText(time.strftime("%H:%M:%S"))
-
-    # ===================== START WORKERS =====================
+    # =================== WORKERS ======================
     def _start_workers(self):
+        self.rov.connectionStatus.connect(self._on_mav_status)
+        self.rov.mavReady.connect(self._on_mav_ready)
+        self.rov.depthSignal.connect(self.dashboard.update_depth)
+        self.rov.headingSignal.connect(self.dashboard.update_heading)
+        self.rov.batterySignal.connect(self.dashboard.update_battery)
+        self.rov.start()
 
-        # MAVLINK
-        self.mav_worker = MavlinkReader()
-        self.mav_worker.connectionStatus.connect(self._on_mavlink_status)
-        self.mav_worker.mavReady.connect(self._on_mav_ready)
-        self.mav_worker.depthSignal.connect(self.dashboard.update_depth)
-        self.mav_worker.headingSignal.connect(self.dashboard.update_heading)
-        self.mav_worker.batterySignal.connect(self.dashboard.update_battery)
-        self.mav_worker.motorSignal.connect(self.dashboard.update_motors)
-        self.mav_worker.start()
-
-        # CAMERA
         self.cam_worker = CameraWorker()
         self.cam_worker.frameSignal.connect(self.dashboard.update_camera_frame)
         self.cam_worker.frameSignal.connect(self.cameraPage.update_camera_frame)
-        self.cam_worker.frameSignal.connect(self.objectPage.update_object_frame)  # 🔹 Nesne algılama sayfasına da frame gönder
+        self.cam_worker.frameSignal.connect(self.objectPage.update_object_frame)
         self.cam_worker.statusSignal.connect(self._on_camera_status)
         self.cam_worker.start()
         self.cameraPage.set_cam_worker(self.cam_worker)
 
-        # JOYSTICK
-        try:
-            self.joy = JoystickWorker()
-            self.joy.axesSignal.connect(self._on_joy_axes)
-            self.joy.buttonsSignal.connect(self._on_joy_buttons)
-            self.joy.start()
-        except Exception as e:
-            print("❌ Joystick başlatılamadı:", e)
+        self.joy = JoystickWorker()
+        self.joy.axesSignal.connect(self._on_joy_axes)
+        self.joy.buttonsSignal.connect(self._on_joy_buttons)
+        self.joy.hatSignal.connect(self._on_hat)
+        self.joy.start()
 
-        # PARAM CACHE
-        if os.path.exists(self.param_cache_path):
-            try:
-                with open(self.param_cache_path, "r", encoding="utf-8") as f:
-                    cached = json.load(f)
-                self.paramsPage.show_param_list(cached)
-            except:
-                pass
-
-    # ===================== STATUS =====================
-    def _on_mavlink_status(self, ok: bool):
+    # =================== STATUS ======================
+    def _on_mav_status(self, ok: bool):
         self.mav_ok = ok
-        self.labelMav.setText("MAVLink: ✓" if ok else "MAVLink: ✖")
-        self._update_top_status()
+        self._update_top()
 
-    def _on_mav_ready(self, mav):
-        self.shared_mav = mav
-
-    def _on_camera_status(self, text: str, ok: bool = True):
-        """
-        CameraWorker.statusSignal(text, ok) çağrıldığında gelir.
-        Burada sadece kamera durumunu flag'e alıp üst barı güncelliyoruz.
-        """
+    def _on_camera_status(self, text, ok=True):
         self.camera_ok = ok
-        self._update_top_status()
+        self._update_top()
 
-    def _update_top_status(self):
-        rov_txt = "Bağlı" if self.mav_ok else "✖"
-        cam_txt = "✓" if self.camera_ok else "✖"
-
-        self.labelTopStatus.setText(
-            f"ROV: {rov_txt}   "
-            f"{self.labelMav.text()}   "
-            f"Kamera: {cam_txt}   "
-            f"Uyarılar: 0"
+    def _update_top(self):
+        self.labelTop.setText(
+            f"RO: {'✓' if self.mav_ok else '✖'}   "
+            f"MAVLink: {'✓' if self.mav_ok else '✖'}   "
+            f"Kamera: {'✓' if self.camera_ok else '✖'}   "
+            f"Speed: x{self.speed_factor:.1f}"
         )
 
-    # ===================== JOYSTICK CALLBACKS =====================
-    def _on_joy_axes(self, axes: list):
+    # =================== MAV READY ======================
+    def _on_mav_ready(self, mav):
+        print("🔥 SHARED_MAV READY")
+        self.shared_mav = mav
+        self.target_sys = mav.target_system or 1
+        self.target_comp = mav.target_component or 1
+        print(f"🎯 USING SYS={self.target_sys} COMP={self.target_comp}")
 
-        # AUTO CALIBRATE ONCE
-        if self.joy_center is None and axes:
-            self.joy_center = axes[:]
-            print("🎯 Joystick merkez kaydedildi:", self.joy_center)
-
-        if self.joy_center is None:
+    # =================== AXES ======================
+    def _on_joy_axes(self, axes):
+        if len(axes) < 4:
             return
 
-        # APPLY CENTER OFFSET
-        axes = [v - c for v, c in zip(axes, self.joy_center)]
+        if self.joy_center is None:
+            self.joy_center = [round(a, 3) for a in axes[:4]]
+            save_center(self.joy_center)
+            print("🎯 Center alındı:", self.joy_center)
+            return
 
-        self.throttle = axes[1] if len(axes) > 1 else 0.0
-        self._send_motor_outputs(axes)
+        axes = [v - c for v, c in zip(axes[:4], self.joy_center)]
 
-    def _on_joy_buttons(self, buttons: list):
+        lx = axes[0]
+        ly = axes[1]
+        rx = axes[2]
+        ry = axes[3]
 
-        # START → ARM
-        if len(buttons) > 7 and buttons[7] == 1 and not self.armed:
+        self.cmd_surge = 0 if abs(-ly) < 0.12 else -ly
+        self.cmd_yaw = 0 if abs(lx) < 0.12 else lx
+        self.cmd_strafe = 0 if abs(rx) < 0.12 else rx
+        self.cmd_throttle = 0 if abs(-ry) < 0.12 else -ry
+
+    # =================== BUTTONS ======================
+    def _on_joy_buttons(self, buttons):
+        start = buttons[7] if len(buttons) > 7 else 0
+        back = buttons[6] if len(buttons) > 6 else 0
+
+        if start == 1 and self.last_start_btn == 0:
             self._arm()
 
-        # BACK → DISARM
-        if len(buttons) > 6 and buttons[6] == 1 and self.armed:
-            if abs(self.throttle) < 0.1:
-                self._disarm()
-            else:
-                print("⚠️ DISARM iptal: throttle yüksek!")
+        if back == 1 and self.last_back_btn == 0:
+            self._disarm()
 
-    # ===================== ARM / DISARM =====================
+        self.last_start_btn = start
+        self.last_back_btn = back
+
+    # =================== D-PAD ======================
+    def _on_hat(self, hat):
+        x, y = hat
+        if y == 1:
+            self.speed_factor = min(self.speed_factor + 0.1, 2.0)
+        elif y == -1:
+            self.speed_factor = max(self.speed_factor - 0.1, 0.2)
+
+        self.labelSpeed.setText(f"Speed: x{self.speed_factor:.1f}")
+        self._update_top()
+
+    # =================== ARM / DISARM ======================
     def _arm(self):
         if not self.shared_mav:
             return
+
         print("🟢 ARM")
+
         self.shared_mav.mav.command_long_send(
-            self.shared_mav.target_system,
-            self.shared_mav.target_component,
-            400, 0,
+            self.target_sys, self.target_comp,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
             1, 0, 0, 0, 0, 0, 0
         )
+
         self.armed = True
+
+        # BLOCK manual control 1 sec (FIX)
+        self.manual_block_until = time.time() + 1.0
 
     def _disarm(self):
         if not self.shared_mav:
             return
         print("🔴 DISARM")
+
         self.shared_mav.mav.command_long_send(
-            self.shared_mav.target_system,
-            self.shared_mav.target_component,
-            400, 0,
+            self.target_sys, self.target_comp,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
             0, 0, 0, 0, 0, 0, 0
         )
+
         self.armed = False
 
-    # ===================== MOTOR MIXING =====================
-    def _send_motor_outputs(self, axes):
-
+    # =================== GCS HEARTBEAT ======================
+    def _send_gcs_heartbeat(self):
         if not self.shared_mav:
             return
 
-        # DEADZONE
-        def dz(v):
-            return 0 if abs(v) < 0.20 else v
+        self.shared_mav.mav.heartbeat_send(
+            mavutil.mavlink.MAV_TYPE_GCS,
+            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+            0, 0,
+            mavutil.mavlink.MAV_STATE_ACTIVE
+        )
 
-        # Aks uzunluk kontrolü
-        ax = axes + [0] * (4 - len(axes))  # eksikse 0 ile doldur
+    # =================== MANUAL CONTROL ======================
+    def _send_manual_control(self):
+        if not self.shared_mav or not self.target_sys:
+            return
 
-        forward = dz(-ax[1])   # İLERİ - GERİ
-        strafe  = dz(ax[0])    # SAĞ - SOL (YANA KAYMA)
-        updown  = dz(-ax[3])   # YUKARI - AŞAĞI
-        yaw     = dz(ax[2])    # SAĞA YAW / SOLA YAW
-
-        pwm = [1500] * 8
-
-        if self.armed:
-
-            # NEUTRAL
-            if forward == 0 and strafe == 0 and updown == 0 and yaw == 0:
-                pwm = [1500] * 8
-
-            else:
-                # FORWARD / BACK
-                for i in [4, 5, 6, 7]:
-                    pwm[i] += int(forward * 400)
-
-                # STRAFE LEFT/RIGHT
-                pwm[4] += int(strafe * 400)   # right
-                pwm[6] -= int(strafe * 400)   # left
-
-                # YAW LEFT/RIGHT
-                pwm[4] += int(yaw * 400)
-                pwm[6] += int(yaw * 400)
-
-                # UP / DOWN
-                pwm[2] = int(1500 + updown * 400)
-                pwm[3] = int(1500 + updown * 400)
-
-                # LIMIT VALUES
-                for i in range(8):
-                    pwm[i] = max(1100, min(1900, pwm[i]))
-
-        try:
-            self.shared_mav.mav.rc_channels_override_send(
-                self.shared_mav.target_system,
-                self.shared_mav.target_component,
-                pwm[0], pwm[1], pwm[2], pwm[3],
-                pwm[4], pwm[5], pwm[6], pwm[7]
+        # BLOCK AFTER ARM
+        if time.time() < self.manual_block_until:
+            # neutral
+            self.shared_mav.mav.manual_control_send(
+                self.target_sys,
+                0, 0, 500, 0,
+                0
             )
-        except Exception as e:
-            print("RC OVERRIDE ERROR:", e)
+            return
 
-    # ===================== CLOSE =====================
+        if not self.armed:
+            self.shared_mav.mav.manual_control_send(
+                self.target_sys,
+                0, 0, 500, 0,
+                0
+            )
+            return
+
+        sf = self.speed_factor
+
+        surge = max(-1, min(1, self.cmd_surge * sf))
+        strafe = max(-1, min(1, self.cmd_strafe * sf))
+        yaw = max(-1, min(1, self.cmd_yaw * sf))
+        thr = max(-1, min(1, self.cmd_throttle * sf))
+
+        x = int(surge * 1000)
+        y = int(strafe * 1000)
+        r = int(yaw * 1000)
+        z = int((1 - thr) * 500)
+
+        z = max(0, min(z, 1000))
+
+        self.shared_mav.mav.manual_control_send(
+            self.target_sys,
+            x, y, z, r,
+            0
+        )
+
+    # =================== CLOSE ======================
     def closeEvent(self, event):
         try:
-            self.mav_worker.quit()
-            self.mav_worker.wait(500)
+            self.joy.stop()
         except:
             pass
-
         try:
             self.cam_worker.stop()
-            self.cam_worker.quit()
-            self.cam_worker.wait(500)
         except:
             pass
-
+        try:
+            self.rov.stop()
+        except:
+            pass
         event.accept()
