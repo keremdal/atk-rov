@@ -1,0 +1,5 @@
+venv/
+*.so
+*.dll
+*.exe
+*.bin
