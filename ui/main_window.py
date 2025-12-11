@@ -20,7 +20,6 @@ from ui.object_page import ObjectPage
 
 from video.camera_worker import CameraWorker
 from input.joystick_worker import JoystickWorker
-from input.joy_center import load_center, save_center
 
 
 class MainWindow(QMainWindow):
@@ -29,61 +28,53 @@ class MainWindow(QMainWindow):
 
         self.rov = rov
         self.shared_mav = None
-        self.target_sys = None
-        self.target_comp = None
+
+        # STATE
         self.armed = False
-
-        self.joy_center = load_center()
-        self.cmd_surge = 0.0
-        self.cmd_strafe = 0.0
-        self.cmd_throttle = 0.0
-        self.cmd_yaw = 0.0
-        self.speed_factor = 1.0
-
-        self.last_start_btn = 0
-        self.last_back_btn = 0
-
-        self.manual_block_until = 0  # NEW !!!
-
         self.mav_ok = False
         self.camera_ok = False
+
+        # JOYSTICK
+        self.joy_center = None
+        self.last_buttons = []
+        self.speed = 0.5
+
+        # WINDOW
+        self.showFullScreen()
+        self.setMinimumSize(1150, 680)
+        self.setWindowTitle("ATK ROV STATION")
+
+        # UI LABELS
+        self.labelTime = QLabel("--:--:--")
+        self.labelPing = QLabel("Ping: -- ms")
+        self.labelFPS = QLabel("FPS: --")
+        self.labelMav = QLabel("MAVLink: ✖")
+        self.labelMode = QLabel("Mod: --")
+        self.labelBatt = QLabel("Batarya: --")
+        self.labelStatus = QLabel("Durum: Bekleniyor")
 
         self._build_ui()
         self._build_footer()
         self._start_workers()
         self._start_clock()
 
-        self.showFullScreen()
-        self.setWindowTitle("ATK ROV STATION")
-
-        # CONTROL LOOP
-        self.ctrl_timer = QTimer(self)
-        self.ctrl_timer.timeout.connect(self._send_manual_control)
-        self.ctrl_timer.start(50)
-
-        # HEARTBEAT GCS
-        self.hb_timer = QTimer(self)
-        self.hb_timer.timeout.connect(self._send_gcs_heartbeat)
-        self.hb_timer.start(1000)
-
-    # =================== UI ======================
+    ###########################################################################
+    # UI
+    ###########################################################################
     def _build_ui(self):
-        central = QWidget(self)
+        central = QWidget()
         self.setCentralWidget(central)
         main = QVBoxLayout(central)
 
+        # TOP BAR
         top = QHBoxLayout()
-        title = QLabel("⚡ ATK ROV STATION")
-        title.setStyleSheet("font-size:17px; font-weight:bold; color:#FFD000;")
-        top.addWidget(title)
-
-        self.labelTop = QLabel("ROV: ✖   MAVLink: Bekleniyor   Kamera: ✖   Speed: x1.0")
+        top.addWidget(QLabel("⚡ ATK ROV STATION"))
         top.addStretch()
-        top.addWidget(self.labelTop)
+        top.addWidget(self.labelStatus)
         main.addLayout(top)
 
-        body = QHBoxLayout()
-        main.addLayout(body)
+        content = QHBoxLayout()
+        main.addLayout(content)
 
         self.menu = QListWidget()
         self.menu.addItems([
@@ -92,9 +83,9 @@ class MainWindow(QMainWindow):
             "Telemetri",
             "Motorlar",
             "Parametreler",
-            "PID Ayarları",
+            "PID",
             "Motor Test",
-            "Kayıt / Log",
+            "Log",
             "Sistem",
             "Nesne Algılama"
         ])
@@ -115,238 +106,227 @@ class MainWindow(QMainWindow):
         for p in [
             self.dashboard, self.cameraPage, self.telemetryPage,
             self.motorsPage, self.paramsPage, self.pidPage,
-            self.motorTestPage, self.logPage, self.systemPage,
-            self.objectPage
+            self.motorTestPage, self.logPage, self.systemPage, self.objectPage
         ]:
             self.pages.addWidget(p)
 
-        body.addWidget(self.menu)
-        body.addWidget(self.pages)
-
+        content.addWidget(self.menu)
+        content.addWidget(self.pages)
         self.menu.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.menu.setCurrentRow(0)
 
-    # =================== FOOTER ======================
+    ###########################################################################
+    # FOOTER
+    ###########################################################################
     def _build_footer(self):
         bar = QHBoxLayout()
-        self.labelTime = QLabel("--:--:--")
-        self.labelSpeed = QLabel("Speed: x1.0")
-
-        for w in [self.labelTime, self.labelSpeed]:
-            w.setStyleSheet("font-size:11px; padding:2px 4px;")
-
-        bar.addWidget(self.labelTime)
-        bar.addWidget(QLabel("|"))
-        bar.addWidget(self.labelSpeed)
+        for w in [self.labelTime, self.labelPing, self.labelFPS, self.labelMav, self.labelMode, self.labelBatt]:
+            bar.addWidget(w)
+            bar.addWidget(QLabel("|"))
         bar.addStretch()
 
         footer = QWidget()
-        footer.setFixedHeight(24)
         footer.setLayout(bar)
+        footer.setFixedHeight(26)
         self.centralWidget().layout().addWidget(footer)
 
-    # =================== CLOCK ======================
+    ###########################################################################
+    # CLOCK
+    ###########################################################################
     def _start_clock(self):
-        t = QTimer(self)
-        t.timeout.connect(lambda: self.labelTime.setText(time.strftime("%H:%M:%S")))
-        t.start(1000)
+        self._update_time()
+        timer = QTimer(self)
+        timer.timeout.connect(self._update_time)
+        timer.start(1000)
 
-    # =================== WORKERS ======================
+    def _update_time(self):
+        self.labelTime.setText(time.strftime("%H:%M:%S"))
+
+    ###########################################################################
+    # WORKERS
+    ###########################################################################
     def _start_workers(self):
-        self.rov.connectionStatus.connect(self._on_mav_status)
-        self.rov.mavReady.connect(self._on_mav_ready)
-        self.rov.depthSignal.connect(self.dashboard.update_depth)
-        self.rov.headingSignal.connect(self.dashboard.update_heading)
-        self.rov.batterySignal.connect(self.dashboard.update_battery)
+
+        if hasattr(self.rov, "connectionStatus"):
+            self.rov.connectionStatus.connect(self._on_mav_status)
+
+        if hasattr(self.rov, "mavReady"):
+            self.rov.mavReady.connect(self._on_mav_ready)
+
+        if hasattr(self.rov, "logSignal"):
+            self.rov.logSignal.connect(self.logPage.add_log)
+
+        if hasattr(self.rov, "depthSignal"):
+            self.rov.depthSignal.connect(self.dashboard.update_depth)
+
+        if hasattr(self.rov, "headingSignal"):
+            self.rov.headingSignal.connect(self.dashboard.update_heading)
+
+        if hasattr(self.rov, "batterySignal"):
+            self.rov.batterySignal.connect(self.dashboard.update_battery)
+
         self.rov.start()
 
-        self.cam_worker = CameraWorker()
-        self.cam_worker.frameSignal.connect(self.dashboard.update_camera_frame)
-        self.cam_worker.frameSignal.connect(self.cameraPage.update_camera_frame)
-        self.cam_worker.frameSignal.connect(self.objectPage.update_object_frame)
-        self.cam_worker.statusSignal.connect(self._on_camera_status)
-        self.cam_worker.start()
-        self.cameraPage.set_cam_worker(self.cam_worker)
+        # CAMERA
+        self.cam = CameraWorker()
+        self.cam.frameSignal.connect(self.dashboard.update_camera_frame)
+        self.cam.frameSignal.connect(self.cameraPage.update_camera_frame)
+        self.cam.frameSignal.connect(self.objectPage.update_object_frame)
+        self.cam.statusSignal.connect(lambda t, ok=True: None)
+        self.cam.start()
 
-        self.joy = JoystickWorker()
-        self.joy.axesSignal.connect(self._on_joy_axes)
-        self.joy.buttonsSignal.connect(self._on_joy_buttons)
-        self.joy.hatSignal.connect(self._on_hat)
-        self.joy.start()
+        # JOYSTICK
+        try:
+            self.joy = JoystickWorker()
+            self.joy.axesSignal.connect(self._on_axes)
+            self.joy.buttonsSignal.connect(self._on_buttons)
+            self.joy.start()
+            print("🎮 Joystick OK")
+        except Exception as e:
+            print("❌ Joystick ERROR:", e)
 
-    # =================== STATUS ======================
-    def _on_mav_status(self, ok: bool):
-        self.mav_ok = ok
-        self._update_top()
-
-    def _on_camera_status(self, text, ok=True):
-        self.camera_ok = ok
-        self._update_top()
-
-    def _update_top(self):
-        self.labelTop.setText(
-            f"RO: {'✓' if self.mav_ok else '✖'}   "
-            f"MAVLink: {'✓' if self.mav_ok else '✖'}   "
-            f"Kamera: {'✓' if self.camera_ok else '✖'}   "
-            f"Speed: x{self.speed_factor:.1f}"
-        )
-
-    # =================== MAV READY ======================
+    ###########################################################################
+    # MAV
+    ###########################################################################
     def _on_mav_ready(self, mav):
-        print("🔥 SHARED_MAV READY")
         self.shared_mav = mav
-        self.target_sys = mav.target_system or 1
-        self.target_comp = mav.target_component or 1
-        print(f"🎯 USING SYS={self.target_sys} COMP={self.target_comp}")
+        self.mav_ok = True
+        self.labelMav.setText("MAVLink: ✓")
+        self.labelStatus.setText("MAV: Bağlandı")
+        print("🔥 MAV READY")
 
-    # =================== AXES ======================
-    def _on_joy_axes(self, axes):
-        if len(axes) < 4:
-            return
+    def _on_mav_status(self, ok):
+        self.mav_ok = ok
+        self.labelMav.setText("MAVLink: ✓" if ok else "MAVLink: ✖")
 
-        if self.joy_center is None:
-            self.joy_center = [round(a, 3) for a in axes[:4]]
-            save_center(self.joy_center)
-            print("🎯 Center alındı:", self.joy_center)
-            return
-
-        axes = [v - c for v, c in zip(axes[:4], self.joy_center)]
-
-        lx = axes[0]
-        ly = axes[1]
-        rx = axes[2]
-        ry = axes[3]
-
-        self.cmd_surge = 0 if abs(-ly) < 0.12 else -ly
-        self.cmd_yaw = 0 if abs(lx) < 0.12 else lx
-        self.cmd_strafe = 0 if abs(rx) < 0.12 else rx
-        self.cmd_throttle = 0 if abs(-ry) < 0.12 else -ry
-
-    # =================== BUTTONS ======================
-    def _on_joy_buttons(self, buttons):
-        start = buttons[7] if len(buttons) > 7 else 0
-        back = buttons[6] if len(buttons) > 6 else 0
-
-        if start == 1 and self.last_start_btn == 0:
-            self._arm()
-
-        if back == 1 and self.last_back_btn == 0:
-            self._disarm()
-
-        self.last_start_btn = start
-        self.last_back_btn = back
-
-    # =================== D-PAD ======================
-    def _on_hat(self, hat):
-        x, y = hat
-        if y == 1:
-            self.speed_factor = min(self.speed_factor + 0.1, 2.0)
-        elif y == -1:
-            self.speed_factor = max(self.speed_factor - 0.1, 0.2)
-
-        self.labelSpeed.setText(f"Speed: x{self.speed_factor:.1f}")
-        self._update_top()
-
-    # =================== ARM / DISARM ======================
+    ###########################################################################
+    # ARM / DISARM
+    ###########################################################################
     def _arm(self):
         if not self.shared_mav:
+            print("❌ ARM: MAV yok")
             return
 
         print("🟢 ARM")
-
         self.shared_mav.mav.command_long_send(
-            self.target_sys, self.target_comp,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            self.shared_mav.target_system,
+            self.shared_mav.target_component,
+            400,
             0,
             1, 0, 0, 0, 0, 0, 0
         )
-
         self.armed = True
-
-        # BLOCK manual control 1 sec (FIX)
-        self.manual_block_until = time.time() + 1.0
 
     def _disarm(self):
         if not self.shared_mav:
+            print("❌ DISARM: MAV yok")
             return
-        print("🔴 DISARM")
 
+        print("🔴 DISARM")
         self.shared_mav.mav.command_long_send(
-            self.target_sys, self.target_comp,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            self.shared_mav.target_system,
+            self.shared_mav.target_component,
+            400,
             0,
             0, 0, 0, 0, 0, 0, 0
         )
-
         self.armed = False
 
-    # =================== GCS HEARTBEAT ======================
-    def _send_gcs_heartbeat(self):
+    ###########################################################################
+    # MODES
+    ###########################################################################
+    def _set_mode(self, name, mode_id):
         if not self.shared_mav:
+            print("❌ MODE: MAV yok")
             return
 
-        self.shared_mav.mav.heartbeat_send(
-            mavutil.mavlink.MAV_TYPE_GCS,
-            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-            0, 0,
-            mavutil.mavlink.MAV_STATE_ACTIVE
+        print(f"🎛 MODE → {name}")
+        self.labelMode.setText(f"Mod: {name}")
+
+        self.shared_mav.mav.command_long_send(
+            self.shared_mav.target_system,
+            self.shared_mav.target_component,
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            0,
+            1,
+            mode_id,
+            0, 0, 0, 0, 0
         )
 
-    # =================== MANUAL CONTROL ======================
-    def _send_manual_control(self):
-        if not self.shared_mav or not self.target_sys:
+    ###########################################################################
+    # JOYSTICK BUTTONS
+    ###########################################################################
+    def _on_buttons(self, b):
+        if not self.last_buttons:
+            self.last_buttons = [0] * len(b)
+
+        # ARM
+        if b[7] == 1 and self.last_buttons[7] == 0:
+            self._arm()
+
+        # DISARM
+        if b[6] == 1 and self.last_buttons[6] == 0:
+            self._disarm()
+
+        # X → MANUAL
+        if b[2] == 1 and self.last_buttons[2] == 0:
+            self._set_mode("MANUAL", 0)
+
+        # Y → STABILIZE
+        if b[3] == 1 and self.last_buttons[3] == 0:
+            self._set_mode("STABILIZE", 19)
+
+        self.last_buttons = b[:]
+
+    ###########################################################################
+    # JOYSTICK AXES (MOTOR CONTROL)
+    ###########################################################################
+    def _on_axes(self, axes):
+
+        # merkez al
+        if self.joy_center is None:
+            self.joy_center = axes[:]
+            print("🎯 Joystick Center:", self.joy_center)
             return
 
-        # BLOCK AFTER ARM
-        if time.time() < self.manual_block_until:
-            # neutral
-            self.shared_mav.mav.manual_control_send(
-                self.target_sys,
-                0, 0, 500, 0,
-                0
-            )
+        axes = [(v - c) for v, c in zip(axes, self.joy_center)]
+        axes = [0 if abs(v) < 0.06 else v for v in axes]
+
+        # mapping:
+        # SAĞ stick → throttle + lateral
+        heave = -axes[3] * self.speed
+        strafe = axes[2] * self.speed
+
+        # SOL stick → yaw + forward
+        yaw = axes[0] * self.speed
+        forward = -axes[1] * self.speed
+
+        # ARM yoksa → dur
+        if not (self.armed and self.mav_ok):
             return
 
-        if not self.armed:
-            self.shared_mav.mav.manual_control_send(
-                self.target_sys,
-                0, 0, 500, 0,
-                0
-            )
+        # MANUAL modda motor komutu gönderme (çok önemli!)
+        if self.labelMode.text() == "Mod: MANUAL":
             return
 
-        sf = self.speed_factor
-
-        surge = max(-1, min(1, self.cmd_surge * sf))
-        strafe = max(-1, min(1, self.cmd_strafe * sf))
-        yaw = max(-1, min(1, self.cmd_yaw * sf))
-        thr = max(-1, min(1, self.cmd_throttle * sf))
-
-        x = int(surge * 1000)
-        y = int(strafe * 1000)
-        r = int(yaw * 1000)
-        z = int((1 - thr) * 500)
-
-        z = max(0, min(z, 1000))
-
-        self.shared_mav.mav.manual_control_send(
-            self.target_sys,
-            x, y, z, r,
-            0
+        # Stabilize mod → motor gönder
+        self.rov.move(
+            heave * 500,
+            strafe * 500,
+            forward * 500
         )
 
-    # =================== CLOSE ======================
+        if hasattr(self.rov, "turnDegrees"):
+            self.rov.turnDegrees(yaw * 180)
+
+    ###########################################################################
+    # CLOSE
+    ###########################################################################
     def closeEvent(self, event):
-        try:
-            self.joy.stop()
-        except:
-            pass
-        try:
-            self.cam_worker.stop()
-        except:
-            pass
-        try:
-            self.rov.stop()
-        except:
-            pass
+        try: self.rov.stop()
+        except: pass
+        try: self.cam.stop()
+        except: pass
+        try: self.joy.stop()
+        except: pass
         event.accept()

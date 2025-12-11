@@ -1,5 +1,29 @@
+# Python
 venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+*.log
+
+# Compiled
 *.so
 *.dll
 *.exe
 *.bin
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Build folders
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/

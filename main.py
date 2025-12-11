@@ -1,18 +1,20 @@
-import sys
 from PyQt5.QtWidgets import QApplication
-
-from mavlink.mavlink_reader import MavlinkReader
 from ui.main_window import MainWindow
+from mavlink.mavlink_reader import MavlinkReader
+
+import sys
 
 if __name__ == "__main__":
-
     app = QApplication(sys.argv)
 
-    # MAVLINK THREAD OLUŞTUR
+    # MAVLINK
     rov = MavlinkReader()
 
-    # WINDOW’A VER
+    # UI
     win = MainWindow(rov)
     win.show()
+
+    # MAVLINK START
+    rov.start()
 
     sys.exit(app.exec_())
